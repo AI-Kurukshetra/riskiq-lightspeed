@@ -14,9 +14,9 @@ export async function POST(request: Request): Promise<Response> {
       return NextResponse.json({ error: "applicationId and userMessage are required" }, { status: 400 });
     }
 
-    const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
-    if (!anthropicApiKey) {
-      return NextResponse.json({ error: "Missing ANTHROPIC_API_KEY" }, { status: 500 });
+    const openAiApiKey = process.env.OPENAI_API_KEY?.trim();
+    if (!openAiApiKey) {
+      return NextResponse.json({ error: "Missing OPENAI_API_KEY" }, { status: 500 });
     }
 
     const admin = createAdminClient();
@@ -38,71 +38,53 @@ Be concise and specific.
 Never make the final decision — only provide analysis and insights.
 Keep responses under 150 words.`;
 
-    const anthropicResponse = await fetch("https://api.anthropic.com/v1/messages", {
+    const openAiResponse = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-api-key": anthropicApiKey,
-        "anthropic-version": "2023-06-01",
+        Authorization: `Bearer ${openAiApiKey}`,
       },
       body: JSON.stringify({
-        model: "claude-3-5-sonnet-latest",
-        max_tokens: 300,
-        stream: true,
-        system: systemPrompt,
-        messages: [
-          ...(body.messages ?? []),
-          { role: "user", content: body.userMessage },
+        model: process.env.OPENAI_MODEL?.trim() || "gpt-5-mini",
+        max_output_tokens: 300,
+        instructions: systemPrompt,
+        input: [
+          ...(body.messages ?? [])
+            .filter((message) => message.content.trim().length > 0)
+            .map((message) => ({
+              role: message.role,
+              content: message.content,
+            })),
+          {
+            role: "user",
+            content: body.userMessage,
+          },
         ],
       }),
     });
 
-    if (!anthropicResponse.ok || !anthropicResponse.body) {
-      const text = await anthropicResponse.text();
-      return NextResponse.json({ error: text || "Anthropic request failed" }, { status: 500 });
+    if (!openAiResponse.ok) {
+      const text = await openAiResponse.text();
+      return NextResponse.json({ error: text || "OpenAI request failed" }, { status: 500 });
     }
 
-    const decoder = new TextDecoder();
-    const encoder = new TextEncoder();
+    const payload = (await openAiResponse.json()) as {
+      output?: Array<{
+        content?: Array<{
+          type?: string;
+          text?: string;
+        }>;
+      }>;
+    };
 
-    const stream = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        const reader = anthropicResponse.body!.getReader();
-        let buffer = "";
+    const answer = payload.output
+      ?.flatMap((item) => item.content ?? [])
+      .filter((item) => item.type === "output_text" && typeof item.text === "string")
+      .map((item) => item.text ?? "")
+      .join("")
+      .trim();
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const payload = line.slice(6).trim();
-            if (payload === "[DONE]") continue;
-
-            try {
-              const parsed = JSON.parse(payload) as {
-                type?: string;
-                delta?: { text?: string };
-              };
-
-              if (parsed.type === "content_block_delta" && parsed.delta?.text) {
-                controller.enqueue(encoder.encode(parsed.delta.text));
-              }
-            } catch {
-              // ignore malformed stream chunks
-            }
-          }
-        }
-
-        controller.close();
-      },
-    });
-
-    return new Response(stream, {
+    return new Response(answer || "No analysis was returned for this application.", {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-cache",

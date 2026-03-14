@@ -34,7 +34,8 @@ export const UnderwritingAssistant = ({ applicationId }: { applicationId: string
   const sendMessage = async (text: string): Promise<void> => {
     if (!text.trim()) return;
 
-    const nextMessages: ChatMessage[] = [...messages, { role: "user", content: text }];
+    const historyMessages: ChatMessage[] = [...messages];
+    const nextMessages: ChatMessage[] = [...historyMessages, { role: "user", content: text }];
     setMessages(nextMessages);
     setInput("");
     setLoading(true);
@@ -44,10 +45,23 @@ export const UnderwritingAssistant = ({ applicationId }: { applicationId: string
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         applicationId,
-        messages: nextMessages,
+        messages: historyMessages,
         userMessage: text,
       }),
     });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: errorText || "The assistant could not respond right now.",
+        },
+      ]);
+      setLoading(false);
+      return;
+    }
 
     if (!response.body) {
       setLoading(false);
@@ -62,6 +76,7 @@ export const UnderwritingAssistant = ({ applicationId }: { applicationId: string
       const { done, value } = await reader.read();
       if (done) break;
       const chunk = decoder.decode(value, { stream: true });
+      if (!chunk) continue;
       setMessages((prev) => {
         const copy = [...prev];
         const currentContent = copy[copy.length - 1]?.content ?? "";
@@ -69,6 +84,18 @@ export const UnderwritingAssistant = ({ applicationId }: { applicationId: string
         return copy;
       });
     }
+
+    setMessages((prev) => {
+      const copy = [...prev];
+      const lastMessage = copy[copy.length - 1];
+      if (lastMessage?.role === "assistant" && lastMessage.content.trim().length === 0) {
+        copy[copy.length - 1] = {
+          role: "assistant",
+          content: "No analysis was returned for this application.",
+        };
+      }
+      return copy;
+    });
 
     setLoading(false);
   };
